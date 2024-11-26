@@ -1,0 +1,9 @@
+# Set default behavior to automatically normalize line endings
+* text=auto
+
+# Explicitly set line endings for specific file types
+*.sh text eol=lf
+*.bat text eol=crlf
+*.jpg binary
+*.png binary
+*.gif binary
