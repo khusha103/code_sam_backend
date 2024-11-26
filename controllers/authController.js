@@ -1,267 +1,279 @@
-const bcrypt = require('bcrypt');
+
 const User = require('../models/User');
-const nodemailer = require('nodemailer');
-const crypto = require('crypto');
+
+const { asyncHandler } = require('../utils/asyncHandler');
+const { validateRequiredFields, validateEmail, validatePassword, validateOTP } = require('../utils/Validation');
+const ApiError = require('../utils/ApiError');
+
+const { ApiResponse } = require('../utils/ApiResponse');
+const { generateOTP, sendVerificationEmail, verifyOtp } = require('../utils/helper');
+const passport = require('passport');
 require('dotenv').config();
 
-// Updated email transporter configuration
-const transporter = nodemailer.createTransport({
-  host: 'smtp.gmail.com',
-  port: 587,
-  secure: false, // true for 465, false for other ports
-  auth: {
-    user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_PASSWORD
-  },
-  tls: {
-    rejectUnauthorized: false
+
+
+
+
+const registerUser=asyncHandler(async(req,res)=>{
+  const {email,password,role}=req.body;
+  const requiredFieldErrors=validateRequiredFields({
+    email,password
+  });
+
+  
+
+  const validationChecks=[
+    { isValid: !requiredFieldErrors, error: requiredFieldErrors },
+        { isValid: validateEmail(email), error: "Invalid email format." },
+        { isValid: validatePassword(password), error: "Password must be at least 6 characters long, include uppercase and lowercase letters, a number, and a special character." },
+  ];
+  for (const { isValid, error } of validationChecks) {
+    if (!isValid) throw new ApiError(400, error);
+}
+
+
+const existingUser=await User.findOne({
+  email
+});
+if(existingUser){
+  throw new ApiError(409,"User already exist");
+
+
+}
+
+
+const allowedRoles=['admin','user'];
+const userRole = allowedRoles.includes(role) ? role : 'user';
+
+const otpCode=generateOTP();
+const otpExpiry=new Date(Date.now()+10*60*1000);  //for 10 min
+try{
+  await sendVerificationEmail(email,otpCode);
+
+ }catch(err){
+   throw new ApiError(500,"Error while sending email");
+ }
+
+ const newUser = new User({
+  role:userRole,
+  email,
+  password,
+  verificationOTP: otpCode,
+  otpExpiry,
+  isVerified: false,
+});
+
+if (!newUser) {
+  throw new ApiError(500, "Error while creating user.");
+}
+await newUser.save();
+
+const createdUser = await User.findOne({
+  email: email
+}).select('-password -otpCode');
+
+return res.status(201).json(
+  new ApiResponse(201, createdUser, "User registered successfully. Please verify your email.")
+);
+
+
+})
+
+
+
+
+const verifyEmail = asyncHandler(async (req, res) => {
+  const { email, otp } = req.body;
+
+  const requiredFieldErrors = validateRequiredFields({ email, otp });
+  const validationChecks = [
+      { isValid: !requiredFieldErrors, error: requiredFieldErrors },
+      { isValid: validateEmail(email), error: "Invalid email format." },
+      { isValid: validateOTP(otp), error: "Invalid OTP format. OTP must be a 6-digit number." },
+  ];
+
+  for (const { isValid, error } of validationChecks) {
+      if (!isValid) throw new ApiError(400, error);
+  }
+
+  
+  const user = await User.findOne({ email });
+  if (!user) {
+      throw new ApiError(404, "User not found.");
+  }
+
+  
+  if (user.isVerified) {
+      throw new ApiError(400, "Email is already verified.");
+  }
+
+
+  if (new Date() > new Date(user.otpExpiry)) {
+      throw new ApiError(400, "OTP has expired. Please request a new one.");
+  }
+
+  
+  let isOtpValid;
+  
+  try {
+     isOtpValid = await user.compareHash(otp, 'verificationOTP');
+  } catch (error) {
+    console.log(error);
+      throw new ApiError(500, "Error verifying OTP.");
+  }
+
+  if (!isOtpValid) {
+      throw new ApiError(400, "Invalid OTP.");
+  }
+
+  user.verificationOTP = null;
+  user.otpExpiry = null;
+  user.isVerified = true;
+
+  try {
+      const updatedUser = await user.save();
+      if (!updatedUser.isVerified) {
+          throw new ApiError(500, "Failed to update. Something went wrong.");
+      }
+
+      const responseUser = { email: updatedUser.email };
+      res.status(200).json(new ApiResponse(200, responseUser, "Email verified successfully."));
+  } catch (err) {
+      console.error(err);
+      throw new ApiError(500, "A Server error occurred.");
   }
 });
 
-// Add verification function
-const verifyEmailConfig = async () => {
-  try {
-    await transporter.verify();
-    console.log('Email configuration verified successfully');
-    return true;
-  } catch (error) {
-    console.error('Email configuration error:', error);
-    throw error;
+
+
+
+const loginUser=asyncHandler(async(req,res)=>{
+  const { email, password } = req.body;
+  const requiredFieldErrors = validateRequiredFields({ email, password });
+  const validationChecks = [
+      {
+          isValid: !requiredFieldErrors,
+          error: new ApiError(400, requiredFieldErrors || "Email and password are required."),
+      },
+      {
+          isValid: validateEmail(email),
+          error: new ApiError(400, "Invalid email format."),
+      },
+      {
+          isValid: validatePassword(password),
+          error: new ApiError(400, "Password must be at least 6 characters long, include uppercase and lowercase letters, a number, and a special character."),
+      },
+  ];
+
+  for (const { isValid, error } of validationChecks) {
+      if (!isValid) throw error;
   }
-};
+   console.log("hey");
+  passport.authenticate('local',async(err,user,info)=>{
+    if(err){
+      console.log(err);
+      return next(new ApiError(500,"Authentication failed."))
 
-// Function to generate OTP
-const generateOTP = () => {
-  return crypto.randomInt(100000, 999999).toString();
-};
+    }
+    if(!user){
+      return res.status(401).json(new ApiResponse(401,{},info?.message || "Invalid login credentials."))
+    }
 
-// Updated send verification email function
-const sendVerificationEmail = async (email, otp) => {
-  try {
-    await verifyEmailConfig(); // Verify configuration before sending
+    try{
+      console.log("hey1");
+      const sanitizedUser = await User.findOne({
+        email
+    }).select('-password -otpCode');
+    if (!sanitizedUser.otpVerified) { 
+      return res
+          .status(403)
+          .json(new ApiResponse(403, {}, "Please verify your email using otp."));
 
-    const mailOptions = {
-      from: `"Your App Name" <${process.env.EMAIL_USER}>`, // Add a proper from name
-      to: email,
-      subject: 'Email Verification for Your Account',
-      html: `
-        <h1>Email Verification</h1>
-        <p>Thank you for registering. Please use the following OTP to verify your email address:</p>
-        <h2 style="color: #4CAF50; letter-spacing: 2px;">${otp}</h2>
-        <p>This OTP will expire in 10 minutes.</p>
-        <p>If you didn't request this verification, please ignore this email.</p>
-      `
-    };
-
-    const info = await transporter.sendMail(mailOptions);
-    console.log('Email sent successfully:', info.messageId);
-    return info;
-  } catch (error) {
-    console.error('Detailed email error:', error);
-    throw error;
   }
-};
 
-// Register a new user
-const registerUser = async (req, res) => {
-  try {
-    console.log('Registration attempt with payload:', {
-      ...req.body,
-      password: '[HIDDEN]',
-      confirmPassword: '[HIDDEN]'
+  await new Promise((resolve, reject) => {
+    req.login(sanitizedUser, (loginErr) => {
+        if (loginErr) {
+            console.error("Error during session creation:", loginErr);
+            return reject(new ApiError(500, "An error occurred during login."));
+        }
+        resolve();
     });
+});
 
-    const { role, email, password } = req.body;
 
-    // Validate required fields
-    if (!role || !email || !password) {
-      console.log('Missing required fields:', { 
-        hasRole: !!role, 
-        hasEmail: !!email, 
-        hasPassword: !!password 
-      });
-      return res.status(400).json({ error: 'All fields are required' });
+return res
+    .status(200)
+    .json(new ApiResponse(200, { user: sanitizedUser }, "Login successful."));
+
+
+    }catch(error){
+      console.error("Error during login process:", error);
+            return next(new ApiError(500, "An internal server error occurred."));
+
     }
+  })
 
-    // Validate email format
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!emailRegex.test(email)) {
-      return res.status(400).json({ error: 'Invalid email format' });
-    }
+});
 
-    // Check if user already exists
-    const existingUser = await User.findOne({ email });
-    if (existingUser) {
-      return res.status(400).json({ error: 'Email already exists' });
-    }
+const resendOtp=asyncHandler(async(req,res)=>{
+  const { email } = req.body;
 
-    // Generate OTP
-    const otp = generateOTP();
-    const otpExpiry = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes expiry
+    
+  const requiredFieldErrors = validateRequiredFields({ email });
+  const validationChecks = [
+      { isValid: !requiredFieldErrors, error: requiredFieldErrors },
+      { isValid: validateEmail(email), error: "Invalid email format." },
+  ];
 
-    // Hash the password
-    console.log('Attempting to hash password...');
-    const hashedPassword = await bcrypt.hash(password, 10);
-    console.log('Password hashed successfully');
-
-    // Create new user with verification fields
-    const newUser = new User({
-      role,
-      email,
-      password: hashedPassword,
-      verificationOTP: otp,
-      otpExpiry: otpExpiry,
-      isVerified: false
-    });
-
-    // Save to the database
-    console.log('Attempting to save user to database...');
-    const savedUser = await newUser.save();
-    console.log('User saved successfully with ID:', savedUser._id);
-
-    // Send verification email
-    try {
-      await sendVerificationEmail(email, otp);
-      console.log('Verification email sent successfully');
-    } catch (emailError) {
-      console.error('Error sending verification email:', emailError);
-      // Delete the user if email sending fails
-      await User.findByIdAndDelete(savedUser._id);
-      return res.status(500).json({ error: 'Failed to send verification email' });
-    }
-
-    res.status(201).json({ 
-      message: 'Registration successful! Please check your email for verification OTP.',
-      userId: savedUser._id
-    });
-
-  } catch (error) {
-    console.error('Registration error details:', {
-      errorName: error.name,
-      errorMessage: error.message,
-      errorCode: error.code,
-      fullError: error
-    });
-
-    if (error.code === 11000) {
-      console.log('Duplicate email detected:', error.keyValue);
-      return res.status(400).json({ error: 'Email already exists' });
-    }
-
-    if (error.name === 'ValidationError') {
-      console.log('Validation error:', error.errors);
-      return res.status(400).json({ 
-        error: 'Validation error', 
-        details: Object.values(error.errors).map(err => err.message)
-      });
-    }
-
-    console.error('Unhandled error during registration:', error);
-    res.status(500).json({ 
-      error: 'An error occurred during registration',
-      details: error.message 
-    });
+  for (const { isValid, error } of validationChecks) {
+      if (!isValid) throw new ApiError(400, error);
   }
-};
 
-// Verify OTP
-const verifyEmail = async (req, res) => {
-  try {
-    const { userId, otp } = req.body;
+  const user=await User.findOne(email);
 
-    const user = await User.findById(userId);
-    if (!user) {
-      return res.status(404).json({ error: 'User not found' });
-    }
+  if (!user) {
+    throw new ApiError(404, "User not found.");
+}
 
-    if (user.isVerified) {
-      return res.status(400).json({ error: 'Email already verified' });
-    }
 
-    if (user.verificationOTP !== otp) {
-      return res.status(400).json({ error: 'Invalid OTP' });
-    }
+if (user.isVerified) {
+    throw new ApiError(400, "Email is already verified.");
+}
 
-    if (new Date() > user.otpExpiry) {
-      return res.status(400).json({ error: 'OTP has expired' });
-    }
 
-    // Mark user as verified
-    user.isVerified = true;
-    user.verificationOTP = undefined;
-    user.otpExpiry = undefined;
-    await user.save();
+const newOtp = generateOTP(); 
+const newOtpExpiration = new Date(Date.now() + 10 * 60 * 1000); 
 
-    res.status(200).json({ message: 'Email verified successfully' });
-  } catch (error) {
-    console.error('Verification error:', error);
-    res.status(500).json({ error: 'An error occurred during verification' });
+
+const updatedUser = await User.updateOne(
+  { email }, 
+  { 
+      $set: { 
+          otpCode: newOtp, 
+          otpExpiration: newOtpExpiration 
+      }
   }
-};
+);
 
-// Login a user
-const loginUser = async (req, res) => {
-  try {
-    console.log('Login attempt for:', {
-      email: req.body.email,
-      hasPassword: !!req.body.password
-    });
+if (updatedUser.nModified === 0) {
+  throw new ApiError(400, "User OTP not updated.");
+}
 
-    const { email, password } = req.body;
+await sendEmail(
+  email,
+  "Resend OTP Code",
+  `<h2>Your new OTP code is ${newOtp}</h2><p>It is valid for 10 minutes.</p>`
+);
 
-    // Check if email and password are provided
-    if (!email || !password) {
-      return res.status(400).json({ 
-        error: 'Please provide both email and password' 
-      });
-    }
+res.status(200).json(
+  new ApiResponse(
+      200,
+      { email },
+      "A new OTP has been sent to your email address."
+  ));
 
-    // Find user by email
-    const user = await User.findOne({ email });
-    console.log('User found:', !!user);
 
-    if (!user) {
-      return res.status(401).json({ 
-        error: 'Invalid email or password' 
-      });
-    }
+});
 
-    // Check if email is verified
-    if (!user.isVerified) {
-      return res.status(401).json({ 
-        error: 'Please verify your email before logging in' 
-      });
-    }
-
-    // Compare password
-    const isPasswordValid = await bcrypt.compare(password, user.password);
-    console.log('Password validation:', isPasswordValid);
-
-    if (!isPasswordValid) {
-      return res.status(401).json({ 
-        error: 'Invalid email or password' 
-      });
-    }
-
-    // Create user data to send back (excluding password)
-    const userData = {
-      id: user._id,
-      email: user.email,
-      role: user.role
-    };
-
-    res.status(200).json({
-      message: 'Login successful',
-      user: userData
-    });
-
-  } catch (error) {
-    console.error('Login error:', error);
-    res.status(500).json({ 
-      error: 'An error occurred during login',
-      details: error.message 
-    });
-  }
-};
-
-module.exports = { registerUser, loginUser, verifyEmail };
+module.exports = { registerUser, loginUser, verifyEmail};

@@ -44,6 +44,7 @@ const app = express();
 const authRoutes = require("./routes/authRoutes");
 const connectDB = require("./config/db");
 const cors = require("cors"); // Import CORS
+const ApiError = require("./utils/ApiError");
 
 // Connect to MongoDB
 connectDB();
@@ -54,7 +55,7 @@ app.use(express.json());
 // CORS Middleware
 app.use(
   cors({
-    origin: "http://localhost:3000", // Allow requests from the frontend React app
+    origin: "http://localhost:3000/", // Allow requests from the frontend React app
     methods: ["GET", "POST", "PUT", "DELETE"], // Allowed HTTP methods
     credentials: true, // Allow cookies to be sent
   })
@@ -66,17 +67,30 @@ app.get("/", (req, res) => {
 });
 
 // Use authentication routes
-app.use("/api/auth", authRoutes);
+app.use("/api/auth/", authRoutes);
 
 // Handle undefined routes
+// app.use((req, res, next) => {
+//   res.status(404).json({ message: "Route not found" });
+// });
+
+// // Global error handler
+// app.use((err, req, res, next) => {
+//   console.error(err.stack);
+//   res.status(500).json({ message: "An error occurred", error: err.message });
+// });
+
 app.use((req, res, next) => {
-  res.status(404).json({ message: "Route not found" });
+  res.status(404).json({ message: 'Not Found' });
 });
 
-// Global error handler
+
 app.use((err, req, res, next) => {
+  if (err instanceof ApiError) {
+      return res.status(err.statusCode).json(err.toJson());
+  }
   console.error(err.stack);
-  res.status(500).json({ message: "An error occurred", error: err.message });
+  return res.status(500).json({ message: 'Internal Server Error' });
 });
 
 module.exports = app; // Export the app instance
